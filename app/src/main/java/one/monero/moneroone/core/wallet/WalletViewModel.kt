@@ -66,23 +66,25 @@ sealed class SendState {
     data class Error(val message: String) : SendState()
 }
 
-// ponytail: parse the widget tx cache (dir|amount|timestamp|hash;...) back into
-// TransactionInfo for cold-start seeding. confirmations forced to 10 (Confirmed) — cached
-// txs are virtually always old & confirmed; a pending tx self-corrects on kit emit.
-// fee/blockheight default to 0, so detail screen shows "Fee 0 / Pending" briefly if
-// tapped before kit loads. 3-field legacy entries (pre-hash) are skipped, not synthesized.
+// Parse the widget tx cache (dir|amount|timestamp|hash|fee|blockheight|confirmations;...)
+// back into TransactionInfo for cold-start seeding. Kit's live emissions overwrite these.
+// Legacy entries missing the fee/blockheight/confirmations fields are skipped — the next
+// emit rewrites the cache with all seven fields, so the list only stays empty for one boot.
 internal fun parseCachedTxs(cache: String): List<TransactionInfo> =
     cache.split(";")
         .filter { it.isNotBlank() }
         .mapNotNull { entry ->
             val parts = entry.split("|")
-            if (parts.size < 4) return@mapNotNull null
+            if (parts.size < 7) return@mapNotNull null
             val dir = if (parts[0] == "in") 0 else 1
             val amount = parts[1].toLongOrNull() ?: return@mapNotNull null
             val timestamp = parts[2].toLongOrNull() ?: return@mapNotNull null
+            val fee = parts[4].toLongOrNull() ?: 0L
+            val blockheight = parts[5].toLongOrNull() ?: 0L
+            val confirmations = parts[6].toLongOrNull() ?: 0L
             TransactionInfo(
-                dir, false, false, amount, 0, 0, parts[3], timestamp,
-                "", 0, 0, 10, 0, "", null
+                dir, blockheight == 0L, false, amount, fee, blockheight, parts[3],
+                timestamp, "", 0, 0, confirmations, 0, "", null
             )
         }
 
@@ -151,8 +153,8 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         _selectedCurrency.value = Currency.entries.find { it.code == currencyCode } ?: Currency.USD
     }
 
-    // ponytail: seed last-known state from the widget cache to mask the cold-start
-    // 0-balance / empty-list flash. Kit's live emissions overwrite these on reconnect.
+    // Seed last-known state from the widget cache to mask the cold-start 0-balance /
+    // empty-list flash. Kit's live emissions overwrite these on reconnect.
     private fun seedFromWidgetCache() {
         _walletState.update {
             it.copy(
@@ -169,12 +171,6 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 change24h = WidgetDataStore.getChange24h(context).toDouble()
             )
         }
-        // ponytail: seed recent txs from the widget cache so the list isn't empty on cold
-        // start. confirmations forced to 10 (Confirmed) — cached txs are virtually always
-        // old & confirmed; a genuinely pending tx self-corrects when the kit emits.
-        // fee/blockheight default to 0, so detail screen shows "Fee 0 / Pending" briefly
-        // if tapped before kit loads. 3-field legacy entries (pre-hash) are skipped, not
-        // synthesized — the cache fills with 4-field entries after the next kit emit.
         val cachedTxs = parseCachedTxs(WidgetDataStore.getTransactions(context))
         if (cachedTxs.isNotEmpty()) {
             _walletState.update { it.copy(transactions = cachedTxs) }
@@ -596,14 +592,14 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
                 WalletManager.transactionsFlow.collect { transactions ->
                     Timber.d("Transactions updated: count=${transactions.size}")
                     _walletState.update { it.copy(transactions = transactions) }
-                    // Cache txs for widget (reads 4) + cold-start UI seed (reads up to 50).
-                    // Format: dir|amount|timestamp|hash — 4th field ignored by widget, used by seed.
+                    // Cache txs for widget (reads dir|amount|timestamp) + cold-start UI seed
+                    // (reads all 7). Format: dir|amount|timestamp|hash|fee|blockheight|confirmations
                     val txString = transactions
                         .sortedByDescending { it.timestamp }
                         .take(50)
                         .joinToString(";") { tx ->
                             val dir = if (tx.direction == io.horizontalsystems.monerokit.model.TransactionInfo.Direction.Direction_In) "in" else "out"
-                            "$dir|${tx.amount}|${tx.timestamp}|${tx.hash}"
+                            "$dir|${tx.amount}|${tx.timestamp}|${tx.hash}|${tx.fee}|${tx.blockheight}|${tx.confirmations}"
                         }
                     WidgetDataStore.saveTransactions(context, txString)
                     WalletWidget.updateAll(context)
