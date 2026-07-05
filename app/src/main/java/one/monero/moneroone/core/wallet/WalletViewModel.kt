@@ -119,6 +119,7 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         // Defer price fetch until a wallet exists. Avoids leaking IP to
         // monero.one before the user has generated/restored a key.
         if (_walletState.value.hasWallet) {
+            seedFromWidgetCache()
             fetchPrice()
         }
         checkAndApplyAutoLock()
@@ -128,6 +129,26 @@ class WalletViewModel(application: Application) : AndroidViewModel(application) 
         val prefs = context.getSharedPreferences("monero_wallet", Context.MODE_PRIVATE)
         val currencyCode = prefs.getString("selected_currency", Currency.USD.code)
         _selectedCurrency.value = Currency.entries.find { it.code == currencyCode } ?: Currency.USD
+    }
+
+    // ponytail: seed last-known state from the widget cache to mask the cold-start
+    // 0-balance flash. Kit's live emissions overwrite these on reconnect.
+    private fun seedFromWidgetCache() {
+        _walletState.update {
+            it.copy(
+                balance = Balance(WidgetDataStore.getBalance(context), WidgetDataStore.getUnlockedBalance(context)),
+                // Connecting (not the cached status) so the empty-tx card shows the
+                // spinner instead of "No transactions yet" while the kit loads.
+                syncState = SyncState.Connecting(waiting = false)
+            )
+        }
+        val cachedPrice = WidgetDataStore.getPrice(context)
+        if (cachedPrice > 0f) {
+            _currentPrice.value = CurrentPrice(
+                price = cachedPrice.toDouble(),
+                change24h = WidgetDataStore.getChange24h(context).toDouble()
+            )
+        }
     }
 
     fun checkAndApplyAutoLock() {
